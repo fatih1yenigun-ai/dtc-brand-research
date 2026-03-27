@@ -10,7 +10,18 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# Support both .env and Streamlit secrets
+def _get_api_key():
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        try:
+            import streamlit as st
+            key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            pass
+    return key
+
+client = anthropic.Anthropic(api_key=_get_api_key())
 
 RESEARCH_PROMPT = """Sen bir DTC (Direct-to-Consumer) marka araştırmacısısın.
 

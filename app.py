@@ -122,13 +122,25 @@ st.markdown("""
 
 df = load_brands()
 
+# ── Initialize session state for favorites/folders ───────────────────────────
+if "folders" not in st.session_state:
+    st.session_state.folders = {"Genel": []}  # Default folder
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+
 # ── Sidebar Navigation ──────────────────────────────────────────────────────
 st.sidebar.title("DTC Araştırma Paneli")
 page = st.sidebar.radio(
     "Sayfa Seç",
-    ["Canlı Araştırma", "Marka Tarayıcı", "Kategori Analizi", "TQS Hesaplayıcı", "AOV Tahminleyici", "Pazarlama Açıları"],
+    ["Canlı Araştırma", "Kaydedilenler", "Asistan", "Marka Tarayıcı", "Kategori Analizi", "TQS Hesaplayıcı", "AOV Tahminleyici", "Pazarlama Açıları"],
     index=0,
 )
+
+# Sidebar folder count
+st.sidebar.divider()
+total_saved = sum(len(v) for v in st.session_state.folders.values())
+st.sidebar.metric("Kayıtlı Marka", total_saved)
+st.sidebar.metric("Klasör", len(st.session_state.folders))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 0: LIVE RESEARCH
@@ -252,37 +264,255 @@ if page == "Canlı Araştırma":
                          title="Kategori Dağılımı", hole=0.4)
             st.plotly_chart(fig, use_container_width=True)
 
-        # Export options
+        # Save to folder + Export
+        st.divider()
+        st.subheader("Klasöre Kaydet")
+
+        col_s1, col_s2 = st.columns([2, 1])
+        with col_s1:
+            # Multi-select brands to save
+            brands_to_save = st.multiselect(
+                "Kaydetmek istediğin markaları seç",
+                res_df["Marka"].tolist(),
+                key="save_brands_select",
+            )
+        with col_s2:
+            folder_names = list(st.session_state.folders.keys())
+            target_folder = st.selectbox("Klasör seç", folder_names, key="save_target_folder")
+
+        if st.button("Seçilenleri Kaydet", type="primary", use_container_width=True, key="save_btn"):
+            if brands_to_save:
+                existing_names = {b["Marka"] for b in st.session_state.folders[target_folder]}
+                added = 0
+                for brand_name in brands_to_save:
+                    if brand_name not in existing_names:
+                        brand_data = res_df[res_df["Marka"] == brand_name].iloc[0].to_dict()
+                        st.session_state.folders[target_folder].append(brand_data)
+                        existing_names.add(brand_name)
+                        added += 1
+                st.success(f"{added} marka '{target_folder}' klasörüne kaydedildi!")
+            else:
+                st.warning("Marka seçin")
+
+        # Select all button
+        if st.button("Tümünü Kaydet", use_container_width=True, key="save_all_btn"):
+            existing_names = {b["Marka"] for b in st.session_state.folders[target_folder]}
+            added = 0
+            for _, row in res_df.iterrows():
+                if row["Marka"] not in existing_names:
+                    st.session_state.folders[target_folder].append(row.to_dict())
+                    existing_names.add(row["Marka"])
+                    added += 1
+            st.success(f"{added} marka '{target_folder}' klasörüne kaydedildi!")
+
+        # Export
         st.divider()
         col_e1, col_e2 = st.columns(2)
         with col_e1:
             csv = res_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "CSV İndir",
-                csv,
-                f"DTC_Arastirma_{keyword.replace(' ', '_')}.csv",
-                "text/csv",
-                use_container_width=True,
-            )
+            st.download_button("CSV İndir", csv,
+                f"DTC_Arastirma_{keyword.replace(' ', '_')}.csv", "text/csv",
+                use_container_width=True)
         with col_e2:
-            # Save to Excel
             from io import BytesIO
             buffer = BytesIO()
             res_df.to_excel(buffer, index=False, engine="openpyxl")
-            st.download_button(
-                "Excel İndir",
-                buffer.getvalue(),
+            st.download_button("Excel İndir", buffer.getvalue(),
                 f"DTC_Arastirma_{keyword.replace(' ', '_')}.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+                use_container_width=True)
 
-    # Research history
-    if st.session_state.research_history:
-        st.divider()
-        st.subheader("Araştırma Geçmişi")
-        for i, h in enumerate(reversed(st.session_state.research_history)):
-            st.markdown(f"**{i+1}.** `{h['keyword']}` → {h['count']} marka bulundu")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: KAYDEDILENLER (SAVED / FAVORITES)
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Kaydedilenler":
+    st.markdown('<p class="main-header">Kaydedilenler</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Favori markalarını klasörlerle düzenle</p>', unsafe_allow_html=True)
+
+    # Folder management
+    col_fm1, col_fm2, col_fm3 = st.columns([2, 1, 1])
+    with col_fm1:
+        new_folder = st.text_input("Yeni klasör adı", placeholder="örn: Kozmetik, Yatak, Atıştırmalık...")
+    with col_fm2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Klasör Oluştur", type="primary", use_container_width=True):
+            if new_folder and new_folder not in st.session_state.folders:
+                st.session_state.folders[new_folder] = []
+                st.success(f"'{new_folder}' klasörü oluşturuldu!")
+                st.rerun()
+            elif new_folder in st.session_state.folders:
+                st.warning("Bu klasör zaten var")
+    with col_fm3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        delete_folder = st.selectbox(
+            "Sil", [f for f in st.session_state.folders.keys() if f != "Genel"],
+            key="del_folder", label_visibility="collapsed",
+        )
+        if st.button("Klasörü Sil", use_container_width=True):
+            if delete_folder and delete_folder in st.session_state.folders:
+                del st.session_state.folders[delete_folder]
+                st.success(f"'{delete_folder}' silindi")
+                st.rerun()
+
+    st.divider()
+
+    # Folder tabs
+    folder_names = list(st.session_state.folders.keys())
+    if folder_names:
+        tabs = st.tabs(folder_names)
+        for tab, folder_name in zip(tabs, folder_names):
+            with tab:
+                brands = st.session_state.folders[folder_name]
+                if brands:
+                    st.markdown(f"**{len(brands)}** marka kayıtlı")
+                    folder_df = pd.DataFrame(brands)
+
+                    # Display saved brands
+                    display_cols = [c for c in ["Marka", "Web Sitesi", "Kategori", "Alt Niş",
+                                                "AOV ($)", "Öne Çıkan Özellik", "Meta Ads"] if c in folder_df.columns]
+                    col_config = {}
+                    if "Web Sitesi" in display_cols:
+                        col_config["Web Sitesi"] = st.column_config.LinkColumn("Web Sitesi", display_text="Ziyaret Et")
+                    if "Meta Ads" in display_cols:
+                        col_config["Meta Ads"] = st.column_config.LinkColumn("Meta Ads", display_text="Reklamları Gör")
+                    if "AOV ($)" in display_cols:
+                        col_config["AOV ($)"] = st.column_config.NumberColumn("AOV ($)", format="$%d")
+
+                    st.dataframe(folder_df[display_cols], use_container_width=True, height=400,
+                                 column_config=col_config)
+
+                    # Remove brands
+                    remove_brands = st.multiselect(
+                        "Kaldırmak istediğin markaları seç",
+                        [b.get("Marka", b.get("brand", "")) for b in brands],
+                        key=f"remove_{folder_name}",
+                    )
+                    col_r1, col_r2 = st.columns(2)
+                    with col_r1:
+                        if st.button("Seçilenleri Kaldır", key=f"rem_btn_{folder_name}"):
+                            st.session_state.folders[folder_name] = [
+                                b for b in brands if b.get("Marka", b.get("brand", "")) not in remove_brands
+                            ]
+                            st.success(f"{len(remove_brands)} marka kaldırıldı")
+                            st.rerun()
+                    with col_r2:
+                        # Move to another folder
+                        other_folders = [f for f in folder_names if f != folder_name]
+                        if other_folders and remove_brands:
+                            move_to = st.selectbox("Taşı →", other_folders, key=f"move_{folder_name}")
+                            if st.button("Seçilenleri Taşı", key=f"move_btn_{folder_name}"):
+                                moved = 0
+                                existing = {b.get("Marka", "") for b in st.session_state.folders[move_to]}
+                                for b in brands:
+                                    bname = b.get("Marka", b.get("brand", ""))
+                                    if bname in remove_brands and bname not in existing:
+                                        st.session_state.folders[move_to].append(b)
+                                        moved += 1
+                                st.session_state.folders[folder_name] = [
+                                    b for b in brands if b.get("Marka", b.get("brand", "")) not in remove_brands
+                                ]
+                                st.success(f"{moved} marka '{move_to}' klasörüne taşındı")
+                                st.rerun()
+
+                    # Export folder
+                    st.divider()
+                    col_x1, col_x2 = st.columns(2)
+                    with col_x1:
+                        csv = folder_df.to_csv(index=False).encode("utf-8")
+                        st.download_button(f"CSV İndir", csv,
+                            f"Kaydedilenler_{folder_name}.csv", "text/csv",
+                            use_container_width=True, key=f"csv_{folder_name}")
+                    with col_x2:
+                        from io import BytesIO
+                        buf = BytesIO()
+                        folder_df.to_excel(buf, index=False, engine="openpyxl")
+                        st.download_button(f"Excel İndir", buf.getvalue(),
+                            f"Kaydedilenler_{folder_name}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True, key=f"xlsx_{folder_name}")
+                else:
+                    st.info(f"'{folder_name}' klasörü boş. Canlı Araştırma'dan marka ekleyin.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: ASISTAN (CHAT WITH CLAUDE)
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Asistan":
+    st.markdown('<p class="main-header">Asistan</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">DTC araştırma asistanınla sohbet et</p>', unsafe_allow_html=True)
+
+    # Display chat history
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat input
+    if prompt := st.chat_input("Bir şey sor... (örn: 'Bambu tekstil markalarını karşılaştır')"):
+        # Add user message
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Generate response
+        with st.chat_message("assistant"):
+            try:
+                import anthropic
+                from dotenv import load_dotenv
+                load_dotenv()
+                api_key = os.getenv("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY", "")
+
+                if not api_key:
+                    st.error("API anahtarı bulunamadı. Streamlit Secrets'a ANTHROPIC_API_KEY ekleyin.")
+                else:
+                    client = anthropic.Anthropic(api_key=api_key)
+
+                    # Build context about saved brands
+                    saved_context = ""
+                    for fname, brands in st.session_state.folders.items():
+                        if brands:
+                            brand_names = ", ".join(b.get("Marka", "") for b in brands[:20])
+                            saved_context += f"\nKlasör '{fname}': {brand_names}"
+
+                    system_prompt = f"""Sen bir DTC (Direct-to-Consumer) e-ticaret uzmanısın. Türkçe yanıt ver.
+Kullanıcının kayıtlı markaları:{saved_context if saved_context else ' Henüz kayıtlı marka yok.'}
+
+Görevin:
+- DTC marka araştırması konusunda yardım et
+- Pazarlama açıları, ürün fikirleri, niş analizi yap
+- Türkiye pazarı için öneriler ver
+- Kısa ve öz yanıtlar ver
+- Marka karşılaştırmaları yap
+- AOV, TQS, dönüşüm oranı hakkında bilgi ver"""
+
+                    # Build message history (last 20 messages)
+                    messages = [{"role": m["role"], "content": m["content"]}
+                                for m in st.session_state.chat_messages[-20:]]
+
+                    with st.spinner("Düşünüyor..."):
+                        response = client.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=2000,
+                            system=system_prompt,
+                            messages=messages,
+                        )
+                        reply = response.content[0].text
+
+                    st.markdown(reply)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+
+            except Exception as e:
+                error_msg = str(e)
+                if "credit" in error_msg.lower():
+                    st.error("API kredisi yetersiz. console.anthropic.com'dan kredi yükleyin.")
+                else:
+                    st.error(f"Hata: {error_msg}")
+
+    # Clear chat button
+    if st.session_state.chat_messages:
+        if st.button("Sohbeti Temizle"):
+            st.session_state.chat_messages = []
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
