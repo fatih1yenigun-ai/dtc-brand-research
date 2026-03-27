@@ -1,0 +1,709 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))
+
+from tqs_calculator import (
+    calc_tqs, tqs_to_conversion, estimate_revenue,
+    bounce_score, pages_score, duration_score,
+    get_niche_from_category, NICHE_CONVERSION_TABLES, TQS_TO_BASE_CONVERSION,
+    NICHE_MULTIPLIERS,
+)
+from brand_metrics import BRAND_METRICS, CATEGORY_AOV_DEFAULTS
+from yuvacim_v3_generator import BRANDS, merge_brands
+
+# ── Load all batch data ──────────────────────────────────────────────────────
+for i in range(1, 20):
+    try:
+        mod = __import__(f"yuvacim_v3_batch{i}")
+        merge_brands(mod.BATCH_DATA)
+    except ImportError:
+        break
+
+
+# ── Build DataFrame ──────────────────────────────────────────────────────────
+@st.cache_data
+def load_brands():
+    rows = []
+    for cat, brands in BRANDS.items():
+        niche = get_niche_from_category(cat)
+        for b in brands:
+            name = b[0]
+            website = b[1]
+            sub_niche = b[2]
+            insight = b[3]
+            history = b[4] if len(b) > 4 else "-"
+
+            m = BRAND_METRICS.get(name, {})
+            founded = m.get("founded", None)
+            traffic = m.get("traffic", None)
+            bounce = m.get("bounce_pct", None)
+            pages = m.get("pages_visit", None)
+            sess = m.get("session_sec", None)
+            aov = m.get("aov", CATEGORY_AOV_DEFAULTS.get(cat, 80))
+
+            tqs = None
+            conv = None
+            est_rev = None
+            if bounce and pages and sess:
+                tqs = calc_tqs(bounce, pages, sess)
+                conv = tqs_to_conversion(tqs, niche)
+                if traffic:
+                    est_rev = round(estimate_revenue(traffic, aov, conv))
+
+            rows.append({
+                "Marka": name,
+                "Web Sitesi": website,
+                "Kategori": cat,
+                "Alt Niş": sub_niche,
+                "Kuruluş Yılı": founded,
+                "Aylık Trafik": traffic,
+                "AOV ($)": aov,
+                "TQS": tqs,
+                "Dönüşüm %": conv,
+                "Tahmini Aylık Gelir ($)": est_rev,
+                "Öne Çıkan Özellik": insight,
+                "Marka Hikayesi": history,
+                "Niş Çarpanı": NICHE_MULTIPLIERS.get(niche, 1.0) if niche else 1.0,
+            })
+    return pd.DataFrame(rows)
+
+
+# ── Page Config ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="DTC Marka Araştırma Paneli",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Custom CSS ───────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.2rem;
+        font-weight: 700;
+        color: #0D1B2A;
+        margin-bottom: 0;
+    }
+    .sub-header {
+        font-size: 1rem;
+        color: #6c757d;
+        margin-top: -10px;
+        margin-bottom: 20px;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 20px;
+        border-radius: 12px;
+        color: white;
+        text-align: center;
+    }
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+    }
+    .metric-label {
+        font-size: 0.85rem;
+        opacity: 0.85;
+    }
+    .stDataFrame {
+        border-radius: 8px;
+    }
+    div[data-testid="stSidebar"] {
+        background-color: #f8f9fa;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+df = load_brands()
+
+# ── Sidebar Navigation ──────────────────────────────────────────────────────
+st.sidebar.title("DTC Araştırma Paneli")
+page = st.sidebar.radio(
+    "Sayfa Seç",
+    ["Canlı Araştırma", "Marka Tarayıcı", "Kategori Analizi", "TQS Hesaplayıcı", "AOV Tahminleyici", "Pazarlama Açıları"],
+    index=0,
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 0: LIVE RESEARCH
+# ══════════════════════════════════════════════════════════════════════════════
+if page == "Canlı Araştırma":
+    st.markdown('<p class="main-header">Canlı Marka Araştırma</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Bir niş/anahtar kelime gir, Claude sana DTC markaları bulsun</p>', unsafe_allow_html=True)
+
+    # Initialize session state for research results
+    if "research_results" not in st.session_state:
+        st.session_state.research_results = None
+    if "research_history" not in st.session_state:
+        st.session_state.research_history = []
+
+    col_r1, col_r2, col_r3 = st.columns([3, 1, 1])
+    with col_r1:
+        keyword = st.text_input(
+            "Niş / Anahtar Kelime",
+            placeholder="örn: bamboo bedding, pet accessories, skincare serums, weighted blankets...",
+        )
+    with col_r2:
+        brand_count = st.selectbox("Marka Sayısı", [10, 20, 30, 50, 75, 100], index=2)
+    with col_r3:
+        niche_type = st.selectbox("Niş Tipi", [
+            "base (Genel)", "food_bev (Yiyecek 2.0x)", "beauty (Güzellik 1.5x)",
+            "fashion (Moda 1.0x)", "electronics (Elektronik 0.7x)", "luxury (Lüks 0.5x)",
+        ])
+
+    search_clicked = st.button("Araştır", type="primary", use_container_width=True)
+
+    if search_clicked and keyword:
+        niche_key = niche_type.split(" ")[0] if not niche_type.startswith("base") else None
+
+        try:
+            from live_researcher import research_brands, research_brands_large
+
+            with st.status(f"'{keyword}' için araştırma yapılıyor...", expanded=True) as status:
+                st.write(f"Claude'a {brand_count} marka sorgulanıyor...")
+
+                if brand_count <= 30:
+                    results = research_brands(keyword, brand_count)
+                else:
+                    progress_bar = st.progress(0)
+                    def update_progress(current, total):
+                        progress_bar.progress(min(current / total, 1.0))
+                        st.write(f"{current}/{total} marka bulundu...")
+
+                    results = research_brands_large(keyword, brand_count, 30, update_progress)
+
+                status.update(label=f"{len(results)} marka bulundu!", state="complete")
+
+            st.session_state.research_results = results
+            st.session_state.research_history.append({
+                "keyword": keyword,
+                "count": len(results),
+                "niche": niche_key,
+            })
+
+        except Exception as e:
+            error_msg = str(e)
+            if "credit balance" in error_msg.lower() or "billing" in error_msg.lower():
+                st.error("API kredisi yetersiz. console.anthropic.com → Plans & Billing'den kredi yükleyin.")
+            else:
+                st.error(f"Hata: {error_msg}")
+
+    # Display results
+    if st.session_state.research_results:
+        results = st.session_state.research_results
+        st.divider()
+        st.subheader(f"{len(results)} Marka Bulundu")
+
+        # Convert to DataFrame
+        rows = []
+        niche_key = niche_type.split(" ")[0] if not niche_type.startswith("base") else None
+        for r in results:
+            aov = r.get("est_aov", 80)
+            founded = r.get("founded", None)
+            meta_url = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL&q={r.get('brand', '')}&search_type=keyword_unordered"
+            website = r.get("website", "")
+            url = f"https://{website}" if website and not website.startswith("http") else website
+
+            rows.append({
+                "Marka": r.get("brand", ""),
+                "Web Sitesi": url,
+                "Kategori": r.get("category", ""),
+                "Alt Niş": r.get("sub_niche", ""),
+                "Kuruluş Yılı": founded,
+                "AOV ($)": aov,
+                "Öne Çıkan Özellik": r.get("insight", ""),
+                "Marka Hikayesi": r.get("history", ""),
+                "Meta Ads": meta_url,
+            })
+
+        res_df = pd.DataFrame(rows)
+
+        # Top stats
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("Bulunan Marka", len(res_df))
+        rc2.metric("Ort. AOV", f"${res_df['AOV ($)'].mean():.0f}")
+        rc3.metric("Kategori", res_df["Kategori"].nunique())
+
+        # Display table
+        st.dataframe(
+            res_df,
+            use_container_width=True,
+            height=500,
+            column_config={
+                "Web Sitesi": st.column_config.LinkColumn("Web Sitesi", display_text="Ziyaret Et"),
+                "AOV ($)": st.column_config.NumberColumn("AOV ($)", format="$%d"),
+                "Meta Ads": st.column_config.LinkColumn("Meta Ads", display_text="Reklamları Gör"),
+                "Öne Çıkan Özellik": st.column_config.TextColumn("Öne Çıkan Özellik", width="large"),
+                "Marka Hikayesi": st.column_config.TextColumn("Marka Hikayesi", width="large"),
+            },
+        )
+
+        # Category breakdown chart
+        if len(res_df) > 5:
+            cat_counts = res_df["Kategori"].value_counts().reset_index()
+            cat_counts.columns = ["Kategori", "Sayı"]
+            fig = px.pie(cat_counts, values="Sayı", names="Kategori",
+                         title="Kategori Dağılımı", hole=0.4)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Export options
+        st.divider()
+        col_e1, col_e2 = st.columns(2)
+        with col_e1:
+            csv = res_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "CSV İndir",
+                csv,
+                f"DTC_Arastirma_{keyword.replace(' ', '_')}.csv",
+                "text/csv",
+                use_container_width=True,
+            )
+        with col_e2:
+            # Save to Excel
+            from io import BytesIO
+            buffer = BytesIO()
+            res_df.to_excel(buffer, index=False, engine="openpyxl")
+            st.download_button(
+                "Excel İndir",
+                buffer.getvalue(),
+                f"DTC_Arastirma_{keyword.replace(' ', '_')}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+    # Research history
+    if st.session_state.research_history:
+        st.divider()
+        st.subheader("Araştırma Geçmişi")
+        for i, h in enumerate(reversed(st.session_state.research_history)):
+            st.markdown(f"**{i+1}.** `{h['keyword']}` → {h['count']} marka bulundu")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 1: BRAND BROWSER
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Marka Tarayıcı":
+    st.markdown('<p class="main-header">Marka Tarayıcı</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="sub-header">{len(df)} post-2018 e-ticaret doğumlu DTC marka</p>', unsafe_allow_html=True)
+
+    # Top metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Toplam Marka", f"{len(df):,}")
+    with col2:
+        st.metric("Kategori", df["Kategori"].nunique())
+    with col3:
+        has_traffic = df["Aylık Trafik"].notna().sum()
+        st.metric("Trafik Verisi Olan", has_traffic)
+    with col4:
+        has_rev = df["Tahmini Aylık Gelir ($)"].notna().sum()
+        st.metric("Gelir Tahmini Olan", has_rev)
+
+    st.divider()
+
+    # Filters
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+
+    with col_f1:
+        cats = ["Tümü"] + sorted(df["Kategori"].unique().tolist())
+        selected_cat = st.selectbox("Kategori", cats)
+
+    with col_f2:
+        search = st.text_input("Marka Ara", placeholder="Marka adı...")
+
+    with col_f3:
+        traffic_filter = st.selectbox("Trafik Filtresi", [
+            "Tümü", "100K+", "50K+", "10K+", "Sadece Verililer"
+        ])
+
+    with col_f4:
+        sort_by = st.selectbox("Sırala", [
+            "Marka (A-Z)", "Tahmini Aylık Gelir ($) ↓", "Aylık Trafik ↓",
+            "AOV ($) ↓", "TQS ↓", "Kuruluş Yılı ↓"
+        ])
+
+    # Apply filters
+    filtered = df.copy()
+    if selected_cat != "Tümü":
+        filtered = filtered[filtered["Kategori"] == selected_cat]
+    if search:
+        filtered = filtered[filtered["Marka"].str.contains(search, case=False, na=False)]
+    if traffic_filter == "100K+":
+        filtered = filtered[filtered["Aylık Trafik"] >= 100_000]
+    elif traffic_filter == "50K+":
+        filtered = filtered[filtered["Aylık Trafik"] >= 50_000]
+    elif traffic_filter == "10K+":
+        filtered = filtered[filtered["Aylık Trafik"] >= 10_000]
+    elif traffic_filter == "Sadece Verililer":
+        filtered = filtered[filtered["Aylık Trafik"].notna()]
+
+    # Sort
+    if "Gelir" in sort_by:
+        filtered = filtered.sort_values("Tahmini Aylık Gelir ($)", ascending=False, na_position="last")
+    elif "Trafik" in sort_by:
+        filtered = filtered.sort_values("Aylık Trafik", ascending=False, na_position="last")
+    elif "AOV" in sort_by:
+        filtered = filtered.sort_values("AOV ($)", ascending=False, na_position="last")
+    elif "TQS" in sort_by:
+        filtered = filtered.sort_values("TQS", ascending=False, na_position="last")
+    elif "Kuruluş" in sort_by:
+        filtered = filtered.sort_values("Kuruluş Yılı", ascending=False, na_position="last")
+    else:
+        filtered = filtered.sort_values("Marka")
+
+    st.markdown(f"**{len(filtered):,}** marka gösteriliyor")
+
+    # Display table
+    display_cols = [
+        "Marka", "Web Sitesi", "Kategori", "Alt Niş", "Kuruluş Yılı",
+        "Aylık Trafik", "AOV ($)", "TQS", "Dönüşüm %",
+        "Tahmini Aylık Gelir ($)", "Öne Çıkan Özellik", "Marka Hikayesi"
+    ]
+
+    st.dataframe(
+        filtered[display_cols],
+        use_container_width=True,
+        height=600,
+        column_config={
+            "Web Sitesi": st.column_config.LinkColumn("Web Sitesi", display_text="Ziyaret Et"),
+            "Aylık Trafik": st.column_config.NumberColumn("Aylık Trafik", format="%d"),
+            "AOV ($)": st.column_config.NumberColumn("AOV ($)", format="$%d"),
+            "TQS": st.column_config.ProgressColumn("TQS", min_value=0, max_value=10, format="%.1f"),
+            "Dönüşüm %": st.column_config.NumberColumn("Dönüşüm %", format="%.2f%%"),
+            "Tahmini Aylık Gelir ($)": st.column_config.NumberColumn("Tahmini Gelir", format="$%d"),
+            "Öne Çıkan Özellik": st.column_config.TextColumn("Öne Çıkan Özellik", width="large"),
+            "Marka Hikayesi": st.column_config.TextColumn("Marka Hikayesi", width="large"),
+        },
+    )
+
+    # Expandable brand detail
+    st.divider()
+    st.subheader("Marka Detayı")
+    brand_names = filtered["Marka"].tolist()
+    if brand_names:
+        selected_brand = st.selectbox("Marka seç", brand_names)
+        brand_row = filtered[filtered["Marka"] == selected_brand].iloc[0]
+
+        col_d1, col_d2 = st.columns([1, 2])
+        with col_d1:
+            st.markdown(f"### {brand_row['Marka']}")
+            website = brand_row["Web Sitesi"]
+            url = f"https://{website}" if not website.startswith("http") else website
+            st.markdown(f"[{website}]({url})")
+            meta_url = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL&q={brand_row['Marka']}&search_type=keyword_unordered"
+            st.markdown(f"[Meta Reklam Kütüphanesi]({meta_url})")
+            st.markdown(f"**Kategori:** {brand_row['Kategori']}")
+            st.markdown(f"**Alt Niş:** {brand_row['Alt Niş']}")
+            if brand_row["Kuruluş Yılı"]:
+                st.markdown(f"**Kuruluş:** {int(brand_row['Kuruluş Yılı'])}")
+
+        with col_d2:
+            if brand_row["Aylık Trafik"]:
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("Aylık Trafik", f"{int(brand_row['Aylık Trafik']):,}")
+                mc2.metric("AOV", f"${int(brand_row['AOV ($)'])}")
+                mc3.metric("TQS", f"{brand_row['TQS']}")
+                mc4.metric("Tahmini Gelir", f"${int(brand_row['Tahmini Aylık Gelir ($)']):,}" if brand_row["Tahmini Aylık Gelir ($)"] else "-")
+
+            st.markdown(f"**Öne Çıkan Özellik:** {brand_row['Öne Çıkan Özellik']}")
+            st.markdown(f"**Marka Hikayesi:** {brand_row['Marka Hikayesi']}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 2: CATEGORY ANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Kategori Analizi":
+    st.markdown('<p class="main-header">Kategori Analizi</p>', unsafe_allow_html=True)
+
+    # Category breakdown
+    cat_stats = df.groupby("Kategori").agg(
+        Marka_Sayısı=("Marka", "count"),
+        Ort_AOV=("AOV ($)", "mean"),
+        Trafik_Olan=("Aylık Trafik", "count"),
+        Toplam_Trafik=("Aylık Trafik", "sum"),
+        Toplam_Gelir=("Tahmini Aylık Gelir ($)", "sum"),
+    ).reset_index()
+    cat_stats = cat_stats.sort_values("Marka_Sayısı", ascending=False)
+
+    # Chart: brands per category
+    fig1 = px.bar(
+        cat_stats, x="Marka_Sayısı", y="Kategori",
+        orientation="h", title="Kategori Bazında Marka Sayısı",
+        color="Marka_Sayısı", color_continuous_scale="Viridis",
+    )
+    fig1.update_layout(height=700, yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # Chart: revenue by category (for those with data)
+    cat_rev = cat_stats[cat_stats["Toplam_Gelir"] > 0].sort_values("Toplam_Gelir", ascending=False)
+    if not cat_rev.empty:
+        fig2 = px.bar(
+            cat_rev, x="Toplam_Gelir", y="Kategori",
+            orientation="h", title="Kategori Bazında Tahmini Toplam Aylık Gelir ($)",
+            color="Toplam_Gelir", color_continuous_scale="Greens",
+        )
+        fig2.update_layout(height=500, yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # AOV comparison
+    fig3 = px.bar(
+        cat_stats.sort_values("Ort_AOV", ascending=False),
+        x="Ort_AOV", y="Kategori",
+        orientation="h", title="Kategori Bazında Ortalama AOV ($)",
+        color="Ort_AOV", color_continuous_scale="Oranges",
+    )
+    fig3.update_layout(height=700, yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig3, use_container_width=True)
+
+    # Table
+    st.subheader("Detay Tablo")
+    st.dataframe(cat_stats, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 3: TQS CALCULATOR
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "TQS Hesaplayıcı":
+    st.markdown('<p class="main-header">TQS Hesaplayıcı</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Herhangi bir web sitesinin tahmini gelirini hesapla</p>', unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Metrikleri Gir")
+        traffic = st.number_input("Aylık Trafik", min_value=0, value=100000, step=10000)
+        bounce_pct = st.slider("Bounce Rate (%)", 0.0, 100.0, 45.0, 0.5)
+        pages_visit = st.slider("Sayfa / Ziyaret", 1.0, 15.0, 3.5, 0.1)
+        session_min = st.slider("Ort. Oturum Süresi (dakika)", 0.0, 15.0, 2.5, 0.25)
+        session_sec = session_min * 60
+        aov = st.number_input("AOV ($)", min_value=1, value=80, step=5)
+        niche = st.selectbox("Niş", [
+            "base (Genel)", "food_bev (Yiyecek & İçecek - 2.0x)",
+            "beauty (Güzellik - 1.5x)", "fashion (Moda - 1.0x)",
+            "electronics (Elektronik - 0.7x)", "luxury (Lüks - 0.5x)",
+        ])
+        niche_key = niche.split(" ")[0] if niche != "base (Genel)" else None
+
+    with col2:
+        st.subheader("Sonuçlar")
+
+        bs = bounce_score(bounce_pct)
+        ps = pages_score(pages_visit)
+        ds = duration_score(session_sec)
+        tqs = calc_tqs(bounce_pct, pages_visit, session_sec)
+        conv = tqs_to_conversion(tqs, niche_key)
+        rev = round(estimate_revenue(traffic, aov, conv))
+
+        # Score breakdown
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Bounce Score", f"{bs}/10")
+        sc2.metric("Pages Score", f"{ps}/10")
+        sc3.metric("Duration Score", f"{ds}/10")
+
+        st.divider()
+
+        mc1, mc2 = st.columns(2)
+        mc1.metric("TQS", f"{tqs}/10")
+        multiplier = NICHE_MULTIPLIERS.get(niche_key, 1.0) if niche_key else 1.0
+        mc2.metric("Niş Çarpanı", f"{multiplier}x")
+
+        st.divider()
+
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric("Dönüşüm Oranı", f"{conv}%")
+        rc2.metric("Aylık Gelir", f"${rev:,}")
+        rc3.metric("Yıllık Gelir", f"${rev * 12:,}")
+
+        # TQS visual gauge
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=tqs,
+            title={"text": "Traffic Quality Score"},
+            gauge={
+                "axis": {"range": [0, 10]},
+                "bar": {"color": "#2ecc71" if tqs >= 7 else "#f39c12" if tqs >= 4 else "#e74c3c"},
+                "steps": [
+                    {"range": [0, 3], "color": "#fadbd8"},
+                    {"range": [3, 6], "color": "#fef9e7"},
+                    {"range": [6, 10], "color": "#d5f5e3"},
+                ],
+            },
+        ))
+        fig.update_layout(height=250)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Niche conversion table
+    st.divider()
+    st.subheader("Niş Bazlı Dönüşüm Tablosu")
+    table_data = []
+    for tqs_val in range(1, 11):
+        row = {"TQS": tqs_val, "Base": f"{TQS_TO_BASE_CONVERSION[tqs_val]}%"}
+        for niche_name, table in NICHE_CONVERSION_TABLES.items():
+            label = {"food_bev": "Food & Bev (2.0x)", "beauty": "Beauty (1.5x)",
+                     "fashion": "Fashion (1.0x)", "electronics": "Electronics (0.7x)",
+                     "luxury": "Luxury (0.5x)"}[niche_name]
+            row[label] = f"{table[tqs_val]}%"
+        table_data.append(row)
+    st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 4: AOV ESTIMATOR
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "AOV Tahminleyici":
+    st.markdown('<p class="main-header">AOV Tahminleyici</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">En çok satanların fiyatına göre AOV hesapla</p>', unsafe_allow_html=True)
+
+    st.subheader("En Çok Satan Ürünleri Gir")
+
+    num_products = st.slider("Kaç ürün gireceksin?", 1, 10, 5)
+
+    products = []
+    cols = st.columns(min(num_products, 5))
+    for i in range(num_products):
+        with cols[i % 5]:
+            price = st.number_input(f"Ürün {i+1} Fiyatı ($)", min_value=0.0, value=50.0, step=5.0, key=f"p{i}")
+            reviews = st.number_input(f"Yorum Sayısı", min_value=0, value=100, step=10, key=f"r{i}")
+            products.append({"price": price, "reviews": reviews})
+
+    st.divider()
+
+    col_a1, col_a2 = st.columns(2)
+    with col_a1:
+        total_products = st.number_input("Toplam Ürün Sayısı", min_value=1, value=50, step=5)
+        good_upsell = st.checkbox("İyi Upsell / Bundling Var mı?", value=True)
+
+    with col_a2:
+        # Calculate review-weighted AOV
+        total_reviews = sum(p["reviews"] for p in products)
+        if total_reviews > 0:
+            weighted_aov = sum(p["price"] * p["reviews"] for p in products) / total_reviews
+        else:
+            weighted_aov = sum(p["price"] for p in products) / len(products)
+
+        # Apply upsell bump
+        if total_products >= 30 and good_upsell:
+            final_aov = weighted_aov * 1.10
+            bump = "+10% upsell"
+        else:
+            final_aov = weighted_aov
+            bump = "Upsell yok"
+
+        st.metric("Yorum Ağırlıklı AOV", f"${weighted_aov:.2f}")
+        st.metric("Upsell Düzeltmesi", bump)
+        st.metric("Tahmini AOV", f"${final_aov:.2f}")
+
+    # Product breakdown chart
+    if products:
+        prod_df = pd.DataFrame(products)
+        prod_df["Ürün"] = [f"Ürün {i+1}" for i in range(len(products))]
+        prod_df["Ağırlık (%)"] = (prod_df["reviews"] / max(total_reviews, 1) * 100).round(1)
+
+        fig = px.bar(
+            prod_df, x="Ürün", y="reviews",
+            color="price", title="Ürün Bazında Yorum Dağılımı & Fiyat",
+            labels={"reviews": "Yorum Sayısı", "price": "Fiyat ($)"},
+            color_continuous_scale="Viridis",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 5: MARKETING ANGLES
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Pazarlama Açıları":
+    st.markdown('<p class="main-header">Pazarlama Açısı Analizi</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Hangi pazarlama açılarında en fazla talep var?</p>', unsafe_allow_html=True)
+
+    # Keyword-based angle detection
+    ANGLE_KEYWORDS = {
+        "Soğutma / Termal": ["soğut", "cool", "serin", "termal", "sıcaklık"],
+        "Ağırlıklı / Anksiyete": ["ağırlıklı", "weighted", "anksiyete", "anxiety", "cam boncuk"],
+        "Organik / Sertifikalı": ["organik", "organic", "GOTS", "OEKO-TEX", "sertifika"],
+        "Bambu Tekstil": ["bambu", "bamboo", "bambou"],
+        "Sürdürülebilir / Eko": ["sürdürülebilir", "geri dönüşüm", "eco", "eko", "çevreci", "sıfır atık"],
+        "Uyku Optimizasyonu": ["uyku", "sleep", "horlama", "insomnia"],
+        "Memory Foam": ["memory foam", "foam", "viskoelastik"],
+        "Keten / Linen": ["keten", "linen", "flax"],
+        "TikTok / Viral": ["tiktok", "viral", "sosyal medya"],
+        "Instagram Estetik": ["instagram", "pinterest", "estetik", "aesthetic", "minimal"],
+        "Otel & Spa Evde": ["otel", "hotel", "spa", "5 yıldız"],
+        "Bebek & Anne": ["bebek", "baby", "anne", "hamile", "emzirme"],
+        "El Yapımı / Artisan": ["el yapımı", "handmade", "zanaatkar", "artisan"],
+        "Kişiselleştirme": ["kişisel", "custom", "monogram", "personal"],
+        "Abonelik Modeli": ["abonelik", "subscription", "refill"],
+        "Ortopedik / Sağlık": ["ortopedik", "ergonomik", "boyun", "sırt", "omurga"],
+        "Lüks / Premium": ["lüks", "premium", "luxury", "ultra"],
+        "Modüler / Çok Fonksiyonlu": ["modüler", "modular", "çok kullanım", "multi"],
+        "Shark Tank / Crowdfund": ["shark tank", "kickstarter", "crowdfund"],
+        "Celebrity / Influencer": ["celebrity", "ünlü", "influencer", "kollab"],
+    }
+
+    angle_data = []
+    for angle, keywords in ANGLE_KEYWORDS.items():
+        matched = df[df["Öne Çıkan Özellik"].str.lower().apply(
+            lambda x: any(kw.lower() in str(x) for kw in keywords)
+        )]
+        matched_with_traffic = matched[matched["Aylık Trafik"].notna()]
+        angle_data.append({
+            "Pazarlama Açısı": angle,
+            "Marka Sayısı": len(matched),
+            "Trafik Verisi Olan": len(matched_with_traffic),
+            "Toplam Trafik": matched_with_traffic["Aylık Trafik"].sum(),
+            "Toplam Gelir ($)": matched_with_traffic["Tahmini Aylık Gelir ($)"].sum(),
+            "Ort. AOV ($)": matched["AOV ($)"].mean(),
+        })
+
+    angle_df = pd.DataFrame(angle_data).sort_values("Marka Sayısı", ascending=False)
+
+    # Chart
+    fig = px.bar(
+        angle_df, x="Marka Sayısı", y="Pazarlama Açısı",
+        orientation="h", title="Pazarlama Açısı Bazında Marka Sayısı",
+        color="Toplam Gelir ($)", color_continuous_scale="RdYlGn",
+    )
+    fig.update_layout(height=600, yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Revenue chart
+    angle_rev = angle_df[angle_df["Toplam Gelir ($)"] > 0].sort_values("Toplam Gelir ($)", ascending=False)
+    if not angle_rev.empty:
+        fig2 = px.bar(
+            angle_rev, x="Toplam Gelir ($)", y="Pazarlama Açısı",
+            orientation="h", title="Trafik Ağırlıklı Talep (Gelire Göre)",
+            color="Toplam Gelir ($)", color_continuous_scale="Greens",
+        )
+        fig2.update_layout(height=500, yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # Table
+    st.subheader("Detay Tablo")
+    st.dataframe(
+        angle_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Toplam Trafik": st.column_config.NumberColumn(format="%d"),
+            "Toplam Gelir ($)": st.column_config.NumberColumn(format="$%d"),
+            "Ort. AOV ($)": st.column_config.NumberColumn(format="$%.0f"),
+        },
+    )
+
+    # Drill-down
+    st.divider()
+    selected_angle = st.selectbox("Açı Detayı", angle_df["Pazarlama Açısı"].tolist())
+    keywords = ANGLE_KEYWORDS[selected_angle]
+    drill = df[df["Öne Çıkan Özellik"].str.lower().apply(
+        lambda x: any(kw.lower() in str(x) for kw in keywords)
+    )]
+    st.dataframe(
+        drill[["Marka", "Web Sitesi", "Kategori", "Aylık Trafik", "AOV ($)", "TQS", "Tahmini Aylık Gelir ($)", "Öne Çıkan Özellik"]],
+        use_container_width=True,
+        height=400,
+    )
