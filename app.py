@@ -34,7 +34,6 @@ from db import (
     create_folder as db_create_folder,
     delete_folder as db_delete_folder,
     load_brands as db_load_brands,
-    save_brand as db_save_brand,
     save_brands_bulk as db_save_brands_bulk,
     remove_brands_by_name as db_remove_brands_by_name,
     move_brands as db_move_brands,
