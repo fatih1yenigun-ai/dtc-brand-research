@@ -175,7 +175,7 @@ st.sidebar.divider()
 folder_names = db_load_folders()
 total_saved = db_get_all_saved_count()
 st.sidebar.metric("Kayıtlı Marka", total_saved)
-st.sidebar.metric("Klasör", len(st.session_state.folders))
+st.sidebar.metric("Klasör", len(folder_names))
 
 # ── Sidebar AI Danışman (Haiku) ─────────────────────────────────────────────
 st.sidebar.divider()
@@ -540,9 +540,10 @@ elif page == "Hintli Danışman":
 
                     # Build context about saved brands
                     saved_context = ""
-                    for fname, brands in st.session_state.folders.items():
-                        if brands:
-                            brand_names = ", ".join(b.get("Marka", "") for b in brands[:20])
+                    for fname in db_load_folders():
+                        fbrands = db_load_brands(fname)
+                        if fbrands:
+                            brand_names = ", ".join(b.get("Marka", "") for b in fbrands[:20])
                             saved_context += f"\nKlasör '{fname}': {brand_names}"
 
                     system_prompt = f"""Sen Yuvacım markası için çalışan kıdemli bir DTC (Direct-to-Consumer) e-ticaret danışmanısın.
