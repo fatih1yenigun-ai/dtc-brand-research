@@ -325,52 +325,51 @@ if page == "Canlı Araştırma":
         rc2.metric("Ort. AOV", f"${res_df['AOV ($)'].mean():.0f}")
         rc3.metric("Kategori", res_df["Kategori"].nunique())
 
-        # Display table with checkboxes for saving
-        st.markdown("##### Markaları seç ve klasöre kaydet")
+        # Display results table
+        st.dataframe(
+            res_df,
+            use_container_width=True,
+            height=400,
+            column_config={
+                "Web Sitesi": st.column_config.LinkColumn("Web Sitesi", display_text="Ziyaret Et"),
+                "AOV ($)": st.column_config.NumberColumn("AOV ($)", format="$%d"),
+                "Meta Ads": st.column_config.LinkColumn("Meta Ads", display_text="Reklamları Gör"),
+                "Öne Çıkan Özellik": st.column_config.TextColumn("Öne Çıkan Özellik", width="large"),
+                "Marka Hikayesi": st.column_config.TextColumn("Marka Hikayesi", width="large"),
+            },
+        )
 
-        # Add checkboxes via column-based approach
-        save_selections = {}
-        for idx, row in res_df.iterrows():
-            col_chk, col_name, col_site, col_cat, col_aov, col_insight = st.columns([0.5, 2, 2, 1.5, 1, 3])
-            with col_chk:
-                save_selections[idx] = st.checkbox("", key=f"chk_{idx}", label_visibility="collapsed")
-            with col_name:
-                st.markdown(f"**{row['Marka']}**")
-            with col_site:
-                st.markdown(f"[{row['Web Sitesi']}]({row['Web Sitesi']})")
-            with col_cat:
-                st.markdown(row["Kategori"])
-            with col_aov:
-                st.markdown(f"${row['AOV ($)']:.0f}")
-            with col_insight:
-                st.markdown(row["Öne Çıkan Özellik"][:80] if row["Öne Çıkan Özellik"] else "-")
-
-        # Folder selector + save button
+        # Save to folder section
         st.divider()
+        st.markdown("##### Klasöre Kaydet")
+
+        # Select brands
+        brand_list = res_df["Marka"].tolist()
+        selected_brands = st.multiselect("Kaydetmek istediğin markaları seç", brand_list, key="save_brand_select")
+
+        # Folder selector + new folder
         current_folders = db_load_folders()
         col_fs1, col_fs2, col_fs3 = st.columns([2, 2, 1])
         with col_fs1:
             target_folder = st.selectbox("Klasör seç", current_folders, key="save_target_folder")
         with col_fs2:
-            new_folder_name = st.text_input("veya yeni klasör", placeholder="Yeni klasör adı...", key="new_folder_inline")
+            new_folder_name = st.text_input("veya yeni klasör oluştur", placeholder="Yeni klasör adı...", key="new_folder_inline")
         with col_fs3:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Yeni Klasör Oluştur", key="create_folder_inline", use_container_width=True):
+            if st.button("Oluştur", key="create_folder_inline", use_container_width=True):
                 if new_folder_name:
-                    db_create_folder(new_folder_name)
-                    st.success(f"'{new_folder_name}' oluşturuldu!")
-                    st.rerun()
-
-        selected_indices = [idx for idx, checked in save_selections.items() if checked]
+                    if db_create_folder(new_folder_name):
+                        st.success(f"'{new_folder_name}' oluşturuldu!")
+                        st.rerun()
 
         col_sv1, col_sv2 = st.columns(2)
         with col_sv1:
             if st.button("Seçilenleri Kaydet", type="primary", use_container_width=True, key="save_checked_btn"):
-                if selected_indices:
+                if selected_brands:
                     save_folder = new_folder_name if new_folder_name else target_folder
                     if new_folder_name:
                         db_create_folder(new_folder_name)
-                    brands_to_save = [res_df.iloc[idx].to_dict() for idx in selected_indices]
+                    brands_to_save = [res_df[res_df["Marka"] == name].iloc[0].to_dict() for name in selected_brands]
                     added = db_save_brands_bulk(save_folder, brands_to_save)
                     st.success(f"{added} marka '{save_folder}' klasörüne kaydedildi!")
                 else:

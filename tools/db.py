@@ -3,8 +3,10 @@ Supabase persistence layer for saved folders and brands.
 Shared across all users — any changes are visible to everyone.
 """
 import os
+import math
 import streamlit as st
 from supabase import create_client
+
 
 def _get_client():
     """Get Supabase client, trying Streamlit secrets first, then env vars."""
@@ -12,6 +14,8 @@ def _get_client():
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
     except Exception:
+        from dotenv import load_dotenv
+        load_dotenv()
         url = os.getenv("SUPABASE_URL", "")
         key = os.getenv("SUPABASE_KEY", "")
     if not url or not key:
@@ -25,6 +29,28 @@ def get_db():
     return _get_client()
 
 
+def _clean_value(v):
+    """Clean a value for JSON serialization — handle NaN, float('inf'), etc."""
+    if v is None:
+        return None
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        if v == int(v):
+            return int(v)
+    return v
+
+
+def _clean_brand_data(brand_data):
+    """Clean brand data dict for Supabase JSONB storage."""
+    clean = {}
+    for k, v in brand_data.items():
+        if k.startswith("_"):
+            continue
+        clean[k] = _clean_value(v)
+    return clean
+
+
 def load_folders():
     """Load all folder names from Supabase."""
     db = get_db()
@@ -34,7 +60,8 @@ def load_folders():
         result = db.table("folders").select("name").order("created_at").execute()
         names = [r["name"] for r in result.data]
         return names if names else ["Genel"]
-    except Exception:
+    except Exception as e:
+        st.error(f"Klasör yükleme hatası: {e}")
         return ["Genel"]
 
 
@@ -42,11 +69,18 @@ def create_folder(name):
     """Create a new folder. Returns True if created, False if exists."""
     db = get_db()
     if not db:
+        st.error("Veritabanı bağlantısı yok")
         return False
     try:
         db.table("folders").insert({"name": name}).execute()
+        # Clear the cache so folder list refreshes
+        load_folders.clear() if hasattr(load_folders, 'clear') else None
         return True
-    except Exception:
+    except Exception as e:
+        if "duplicate" in str(e).lower() or "unique" in str(e).lower() or "23505" in str(e):
+            st.warning("Bu klasör zaten var")
+        else:
+            st.error(f"Klasör oluşturma hatası: {e}")
         return False
 
 
@@ -58,8 +92,8 @@ def delete_folder(name):
     try:
         db.table("saved_brands").delete().eq("folder_name", name).execute()
         db.table("folders").delete().eq("name", name).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"Klasör silme hatası: {e}")
 
 
 def load_brands(folder_name):
@@ -74,61 +108,55 @@ def load_brands(folder_name):
                   .order("created_at")
                   .execute())
         return [{"_db_id": r["id"], **r["brand_data"]} for r in result.data]
-    except Exception:
+    except Exception as e:
+        st.error(f"Marka yükleme hatası: {e}")
         return []
-
-
-def save_brand(folder_name, brand_data):
-    """Save a single brand to a folder. Returns True if saved (no duplicate)."""
-    db = get_db()
-    if not db:
-        return False
-    try:
-        # Check for duplicate by brand name
-        brand_name = brand_data.get("Marka", brand_data.get("brand", ""))
-        existing = (db.table("saved_brands")
-                    .select("id")
-                    .eq("folder_name", folder_name)
-                    .execute())
-        for row in existing.data:
-            pass  # We'll do a simpler approach — just insert and let duplicates be handled in UI
-
-        # Remove internal keys before saving
-        clean = {k: v for k, v in brand_data.items() if not k.startswith("_")}
-        db.table("saved_brands").insert({
-            "folder_name": folder_name,
-            "brand_data": clean,
-        }).execute()
-        return True
-    except Exception:
-        return False
 
 
 def save_brands_bulk(folder_name, brands_list):
     """Save multiple brands to a folder, skipping duplicates."""
     db = get_db()
     if not db:
+        st.error("Veritabanı bağlantısı yok")
         return 0
+
+    # Ensure folder exists
+    try:
+        existing_folders = [r["name"] for r in db.table("folders").select("name").execute().data]
+        if folder_name not in existing_folders:
+            db.table("folders").insert({"name": folder_name}).execute()
+    except Exception:
+        pass
 
     # Get existing brand names in folder
     existing = load_brands(folder_name)
-    existing_names = {b.get("Marka", b.get("brand", "")).lower() for b in existing}
+    existing_names = set()
+    for b in existing:
+        name = b.get("Marka", b.get("brand", ""))
+        if name:
+            existing_names.add(name.lower())
 
     added = 0
     rows = []
     for brand in brands_list:
         name = brand.get("Marka", brand.get("brand", ""))
+        if not name:
+            continue
         if name.lower() not in existing_names:
-            clean = {k: v for k, v in brand.items() if not k.startswith("_")}
+            clean = _clean_brand_data(brand)
             rows.append({"folder_name": folder_name, "brand_data": clean})
             existing_names.add(name.lower())
             added += 1
 
     if rows:
         try:
-            db.table("saved_brands").insert(rows).execute()
-        except Exception:
-            pass
+            # Insert in batches of 50 to avoid payload limits
+            for i in range(0, len(rows), 50):
+                batch = rows[i:i+50]
+                db.table("saved_brands").insert(batch).execute()
+        except Exception as e:
+            st.error(f"Kaydetme hatası: {e}")
+            return 0
     return added
 
 
@@ -139,15 +167,12 @@ def remove_brand(db_id):
         return
     try:
         db.table("saved_brands").delete().eq("id", db_id).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"Silme hatası: {e}")
 
 
 def remove_brands_by_name(folder_name, brand_names):
     """Remove brands from a folder by their names."""
-    db = get_db()
-    if not db:
-        return
     brands = load_brands(folder_name)
     for b in brands:
         bname = b.get("Marka", b.get("brand", ""))
@@ -160,10 +185,7 @@ def move_brands(from_folder, to_folder, brand_names):
     brands = load_brands(from_folder)
     to_move = [b for b in brands if b.get("Marka", b.get("brand", "")) in brand_names]
 
-    # Save to target folder
     save_brands_bulk(to_folder, to_move)
-
-    # Remove from source
     remove_brands_by_name(from_folder, brand_names)
 
 
