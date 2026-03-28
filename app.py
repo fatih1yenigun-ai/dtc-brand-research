@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sys
 import os
+import json
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))
 
@@ -15,6 +16,7 @@ from tqs_calculator import (
 )
 from brand_metrics import BRAND_METRICS, CATEGORY_AOV_DEFAULTS
 from yuvacim_v3_generator import BRANDS, merge_brands
+from chat_tools import TOOL_DEFINITIONS, execute_tool
 
 # ── Load all batch data ──────────────────────────────────────────────────────
 for i in range(1, 20):
@@ -23,6 +25,47 @@ for i in range(1, 20):
         merge_brands(mod.BATCH_DATA)
     except ImportError:
         break
+
+
+# ── JSON Persistence ─────────────────────────────────────────────────────────
+SAVED_DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_data.json")
+
+
+def load_saved_data():
+    """Load folders from saved_data.json. Initialize if missing."""
+    if os.path.exists(SAVED_DATA_PATH):
+        try:
+            with open(SAVED_DATA_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "folders" not in data:
+                data["folders"] = {"Genel": []}
+            return data
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {"folders": {"Genel": []}}
+
+
+def save_data(data):
+    """Write folders to saved_data.json."""
+    with open(SAVED_DATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ── API Key Helper ───────────────────────────────────────────────────────────
+def get_api_key():
+    """Try st.secrets first, fall back to env var."""
+    try:
+        key = st.secrets["ANTHROPIC_API_KEY"]
+        if key:
+            return key
+    except (KeyError, FileNotFoundError):
+        pass
+    from dotenv import load_dotenv
+    load_dotenv()
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    return None
 
 
 # ── Build DataFrame ──────────────────────────────────────────────────────────
@@ -122,17 +165,21 @@ st.markdown("""
 
 df = load_brands()
 
-# ── Initialize session state for favorites/folders ───────────────────────────
+# ── Load persistent data into session state ──────────────────────────────────
 if "folders" not in st.session_state:
-    st.session_state.folders = {"Genel": []}  # Default folder
+    saved = load_saved_data()
+    st.session_state.folders = saved["folders"]
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
+if "haiku_messages" not in st.session_state:
+    st.session_state.haiku_messages = []
 
 # ── Sidebar Navigation ──────────────────────────────────────────────────────
 st.sidebar.title("DTC Araştırma Paneli")
 page = st.sidebar.radio(
     "Sayfa Seç",
-    ["Canlı Araştırma", "Kaydedilenler", "Asistan", "Marka Tarayıcı", "Kategori Analizi", "TQS Hesaplayıcı", "AOV Tahminleyici", "Pazarlama Açıları"],
+    ["Canlı Araştırma", "Kaydedilenler", "Hintli Danışman", "Marka Tarayıcı",
+     "Kategori Analizi", "TQS Hesaplayıcı", "AOV Tahminleyici", "Pazarlama Açıları"],
     index=0,
 )
 
@@ -141,6 +188,54 @@ st.sidebar.divider()
 total_saved = sum(len(v) for v in st.session_state.folders.values())
 st.sidebar.metric("Kayıtlı Marka", total_saved)
 st.sidebar.metric("Klasör", len(st.session_state.folders))
+
+# ── Sidebar AI Danışman (Haiku) ─────────────────────────────────────────────
+st.sidebar.divider()
+with st.sidebar.expander("💬 AI Danışman", expanded=False):
+    # Display haiku chat history
+    for msg in st.session_state.haiku_messages:
+        role_label = "Sen" if msg["role"] == "user" else "AI"
+        st.markdown(f"**{role_label}:** {msg['content']}")
+
+    haiku_input = st.text_input("Soru sor...", key="haiku_input", placeholder="Kısa bir soru sor...")
+    if st.button("Gönder", key="haiku_send", use_container_width=True):
+        if haiku_input:
+            st.session_state.haiku_messages.append({"role": "user", "content": haiku_input})
+
+            api_key = get_api_key()
+            if not api_key:
+                st.error("API anahtarı bulunamadı. Streamlit Secrets veya .env dosyasına ANTHROPIC_API_KEY ekleyin.")
+            else:
+                try:
+                    import anthropic
+                    client = anthropic.Anthropic(api_key=api_key)
+
+                    system_prompt = """Sen Yuvacım markası için çalışan bir DTC (Direct-to-Consumer) e-ticaret danışmanısın.
+Türkçe yanıt ver. Kısa ve öz ol.
+Türkiye pazarını iyi bilirsin. Pazarlama açıları, ürün fikirleri, reklam stratejileri konusunda fikir verirsin.
+DTC markalar, AOV optimizasyonu, conversion rate, TQS skoru, niş seçimi konularında uzmansın.
+Yuvacım bir Türk DTC markasıdır. Kullanıcı Fatih, bir DTC girişimcisidir."""
+
+                    messages = [{"role": m["role"], "content": m["content"]}
+                                for m in st.session_state.haiku_messages[-20:]]
+
+                    response = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=1000,
+                        system=system_prompt,
+                        messages=messages,
+                    )
+                    reply = response.content[0].text
+                    st.session_state.haiku_messages.append({"role": "assistant", "content": reply})
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Hata: {e}")
+
+    if st.session_state.haiku_messages:
+        if st.button("Temizle", key="haiku_clear", use_container_width=True):
+            st.session_state.haiku_messages = []
+            st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 0: LIVE RESEARCH
@@ -242,19 +337,74 @@ if page == "Canlı Araştırma":
         rc2.metric("Ort. AOV", f"${res_df['AOV ($)'].mean():.0f}")
         rc3.metric("Kategori", res_df["Kategori"].nunique())
 
-        # Display table
-        st.dataframe(
-            res_df,
-            use_container_width=True,
-            height=500,
-            column_config={
-                "Web Sitesi": st.column_config.LinkColumn("Web Sitesi", display_text="Ziyaret Et"),
-                "AOV ($)": st.column_config.NumberColumn("AOV ($)", format="$%d"),
-                "Meta Ads": st.column_config.LinkColumn("Meta Ads", display_text="Reklamları Gör"),
-                "Öne Çıkan Özellik": st.column_config.TextColumn("Öne Çıkan Özellik", width="large"),
-                "Marka Hikayesi": st.column_config.TextColumn("Marka Hikayesi", width="large"),
-            },
-        )
+        # Display table with checkboxes for saving
+        st.markdown("##### Markaları seç ve klasöre kaydet")
+
+        # Add checkboxes via column-based approach
+        save_selections = {}
+        for idx, row in res_df.iterrows():
+            col_chk, col_name, col_site, col_cat, col_aov, col_insight = st.columns([0.5, 2, 2, 1.5, 1, 3])
+            with col_chk:
+                save_selections[idx] = st.checkbox("", key=f"chk_{idx}", label_visibility="collapsed")
+            with col_name:
+                st.markdown(f"**{row['Marka']}**")
+            with col_site:
+                st.markdown(f"[{row['Web Sitesi']}]({row['Web Sitesi']})")
+            with col_cat:
+                st.markdown(row["Kategori"])
+            with col_aov:
+                st.markdown(f"${row['AOV ($)']:.0f}")
+            with col_insight:
+                st.markdown(row["Öne Çıkan Özellik"][:80] if row["Öne Çıkan Özellik"] else "-")
+
+        # Folder selector + save button
+        st.divider()
+        col_fs1, col_fs2, col_fs3 = st.columns([2, 2, 1])
+        with col_fs1:
+            folder_names = list(st.session_state.folders.keys())
+            target_folder = st.selectbox("Klasör seç", folder_names, key="save_target_folder")
+        with col_fs2:
+            new_folder_name = st.text_input("veya yeni klasör", placeholder="Yeni klasör adı...", key="new_folder_inline")
+        with col_fs3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Yeni Klasör Oluştur", key="create_folder_inline", use_container_width=True):
+                if new_folder_name and new_folder_name not in st.session_state.folders:
+                    st.session_state.folders[new_folder_name] = []
+                    save_data({"folders": st.session_state.folders})
+                    st.success(f"'{new_folder_name}' oluşturuldu!")
+                    st.rerun()
+
+        selected_indices = [idx for idx, checked in save_selections.items() if checked]
+
+        col_sv1, col_sv2 = st.columns(2)
+        with col_sv1:
+            if st.button("Seçilenleri Kaydet", type="primary", use_container_width=True, key="save_checked_btn"):
+                if selected_indices:
+                    save_folder = new_folder_name if new_folder_name and new_folder_name in st.session_state.folders else target_folder
+                    existing_names = {b["Marka"] for b in st.session_state.folders[save_folder]}
+                    added = 0
+                    for idx in selected_indices:
+                        brand_data = res_df.iloc[idx].to_dict()
+                        if brand_data["Marka"] not in existing_names:
+                            st.session_state.folders[save_folder].append(brand_data)
+                            existing_names.add(brand_data["Marka"])
+                            added += 1
+                    save_data({"folders": st.session_state.folders})
+                    st.success(f"{added} marka '{save_folder}' klasörüne kaydedildi!")
+                else:
+                    st.warning("Marka seçin")
+        with col_sv2:
+            if st.button("Tümünü Kaydet", use_container_width=True, key="save_all_btn"):
+                save_folder = new_folder_name if new_folder_name and new_folder_name in st.session_state.folders else target_folder
+                existing_names = {b["Marka"] for b in st.session_state.folders[save_folder]}
+                added = 0
+                for _, row in res_df.iterrows():
+                    if row["Marka"] not in existing_names:
+                        st.session_state.folders[save_folder].append(row.to_dict())
+                        existing_names.add(row["Marka"])
+                        added += 1
+                save_data({"folders": st.session_state.folders})
+                st.success(f"{added} marka '{save_folder}' klasörüne kaydedildi!")
 
         # Category breakdown chart
         if len(res_df) > 5:
@@ -263,47 +413,6 @@ if page == "Canlı Araştırma":
             fig = px.pie(cat_counts, values="Sayı", names="Kategori",
                          title="Kategori Dağılımı", hole=0.4)
             st.plotly_chart(fig, use_container_width=True)
-
-        # Save to folder + Export
-        st.divider()
-        st.subheader("Klasöre Kaydet")
-
-        col_s1, col_s2 = st.columns([2, 1])
-        with col_s1:
-            # Multi-select brands to save
-            brands_to_save = st.multiselect(
-                "Kaydetmek istediğin markaları seç",
-                res_df["Marka"].tolist(),
-                key="save_brands_select",
-            )
-        with col_s2:
-            folder_names = list(st.session_state.folders.keys())
-            target_folder = st.selectbox("Klasör seç", folder_names, key="save_target_folder")
-
-        if st.button("Seçilenleri Kaydet", type="primary", use_container_width=True, key="save_btn"):
-            if brands_to_save:
-                existing_names = {b["Marka"] for b in st.session_state.folders[target_folder]}
-                added = 0
-                for brand_name in brands_to_save:
-                    if brand_name not in existing_names:
-                        brand_data = res_df[res_df["Marka"] == brand_name].iloc[0].to_dict()
-                        st.session_state.folders[target_folder].append(brand_data)
-                        existing_names.add(brand_name)
-                        added += 1
-                st.success(f"{added} marka '{target_folder}' klasörüne kaydedildi!")
-            else:
-                st.warning("Marka seçin")
-
-        # Select all button
-        if st.button("Tümünü Kaydet", use_container_width=True, key="save_all_btn"):
-            existing_names = {b["Marka"] for b in st.session_state.folders[target_folder]}
-            added = 0
-            for _, row in res_df.iterrows():
-                if row["Marka"] not in existing_names:
-                    st.session_state.folders[target_folder].append(row.to_dict())
-                    existing_names.add(row["Marka"])
-                    added += 1
-            st.success(f"{added} marka '{target_folder}' klasörüne kaydedildi!")
 
         # Export
         st.divider()
@@ -339,6 +448,7 @@ elif page == "Kaydedilenler":
         if st.button("Klasör Oluştur", type="primary", use_container_width=True):
             if new_folder and new_folder not in st.session_state.folders:
                 st.session_state.folders[new_folder] = []
+                save_data({"folders": st.session_state.folders})
                 st.success(f"'{new_folder}' klasörü oluşturuldu!")
                 st.rerun()
             elif new_folder in st.session_state.folders:
@@ -352,6 +462,7 @@ elif page == "Kaydedilenler":
         if st.button("Klasörü Sil", use_container_width=True):
             if delete_folder and delete_folder in st.session_state.folders:
                 del st.session_state.folders[delete_folder]
+                save_data({"folders": st.session_state.folders})
                 st.success(f"'{delete_folder}' silindi")
                 st.rerun()
 
@@ -394,6 +505,7 @@ elif page == "Kaydedilenler":
                             st.session_state.folders[folder_name] = [
                                 b for b in brands if b.get("Marka", b.get("brand", "")) not in remove_brands
                             ]
+                            save_data({"folders": st.session_state.folders})
                             st.success(f"{len(remove_brands)} marka kaldırıldı")
                             st.rerun()
                     with col_r2:
@@ -412,6 +524,7 @@ elif page == "Kaydedilenler":
                                 st.session_state.folders[folder_name] = [
                                     b for b in brands if b.get("Marka", b.get("brand", "")) not in remove_brands
                                 ]
+                                save_data({"folders": st.session_state.folders})
                                 st.success(f"{moved} marka '{move_to}' klasörüne taşındı")
                                 st.rerun()
 
@@ -436,11 +549,11 @@ elif page == "Kaydedilenler":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: ASISTAN (CHAT WITH CLAUDE)
+# PAGE: HİNTLİ DANIŞMAN (CHAT WITH CLAUDE SONNET + TOOL CALLING)
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == "Asistan":
-    st.markdown('<p class="main-header">Asistan</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">DTC araştırma asistanınla sohbet et</p>', unsafe_allow_html=True)
+elif page == "Hintli Danışman":
+    st.markdown('<p class="main-header">Hintli Danışman</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Sonnet ile güçlendirilmiş DTC danışmanın — araçları kullanabilir</p>', unsafe_allow_html=True)
 
     # Display chat history
     for msg in st.session_state.chat_messages:
@@ -448,23 +561,20 @@ elif page == "Asistan":
             st.markdown(msg["content"])
 
     # Chat input
-    if prompt := st.chat_input("Bir şey sor... (örn: 'Bambu tekstil markalarını karşılaştır')"):
+    if prompt := st.chat_input("Bir şey sor... (örn: 'Bu sitenin TQS skorunu hesapla', 'Bambu niş araştırması yap')"):
         # Add user message
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Generate response
+        # Generate response with tool calling
         with st.chat_message("assistant"):
-            try:
-                import anthropic
-                from dotenv import load_dotenv
-                load_dotenv()
-                api_key = os.getenv("ANTHROPIC_API_KEY") or st.secrets.get("ANTHROPIC_API_KEY", "")
-
-                if not api_key:
-                    st.error("API anahtarı bulunamadı. Streamlit Secrets'a ANTHROPIC_API_KEY ekleyin.")
-                else:
+            api_key = get_api_key()
+            if not api_key:
+                st.error("API anahtarı bulunamadı. Streamlit Secrets veya .env dosyasına ANTHROPIC_API_KEY ekleyin.")
+            else:
+                try:
+                    import anthropic
                     client = anthropic.Anthropic(api_key=api_key)
 
                     # Build context about saved brands
@@ -474,16 +584,22 @@ elif page == "Asistan":
                             brand_names = ", ".join(b.get("Marka", "") for b in brands[:20])
                             saved_context += f"\nKlasör '{fname}': {brand_names}"
 
-                    system_prompt = f"""Sen bir DTC (Direct-to-Consumer) e-ticaret uzmanısın. Türkçe yanıt ver.
+                    system_prompt = f"""Sen Yuvacım markası için çalışan kıdemli bir DTC (Direct-to-Consumer) e-ticaret danışmanısın.
+Türkçe yanıt ver. Adın "Hintli Danışman".
+
+Yuvacım bir Türk DTC markasıdır. Kullanıcı Fatih, Türkiye'de DTC markaları kuran bir girişimcidir.
+
 Kullanıcının kayıtlı markaları:{saved_context if saved_context else ' Henüz kayıtlı marka yok.'}
 
 Görevin:
 - DTC marka araştırması konusunda yardım et
 - Pazarlama açıları, ürün fikirleri, niş analizi yap
 - Türkiye pazarı için öneriler ver
-- Kısa ve öz yanıtlar ver
 - Marka karşılaştırmaları yap
-- AOV, TQS, dönüşüm oranı hakkında bilgi ver"""
+- AOV, TQS, dönüşüm oranı hakkında bilgi ver
+- Gerektiğinde araçları (tools) kullan: TQS hesaplama, marka araştırma, AOV tahmini, niş dönüşüm tablosu
+
+Araçları proaktif kullan. Kullanıcı bir site hakkında sorduğunda TQS hesapla, niş sorduğunda araştırma yap."""
 
                     # Build message history (last 20 messages)
                     messages = [{"role": m["role"], "content": m["content"]}
@@ -491,22 +607,52 @@ Görevin:
 
                     with st.spinner("Düşünüyor..."):
                         response = client.messages.create(
-                            model="claude-haiku-4-5-20251001",
-                            max_tokens=2000,
+                            model="claude-sonnet-4-20250514",
+                            max_tokens=4000,
                             system=system_prompt,
+                            tools=TOOL_DEFINITIONS,
                             messages=messages,
                         )
-                        reply = response.content[0].text
 
-                    st.markdown(reply)
-                    st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+                        # Tool use loop
+                        tool_call_count = 0
+                        while response.stop_reason == "tool_use" and tool_call_count < 5:
+                            tool_call_count += 1
+                            tool_results = []
+                            for block in response.content:
+                                if block.type == "tool_use":
+                                    st.info(f"🔧 Araç kullanılıyor: **{block.name}**")
+                                    result = execute_tool(block.name, block.input)
+                                    tool_results.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": result,
+                                    })
 
-            except Exception as e:
-                error_msg = str(e)
-                if "credit" in error_msg.lower():
-                    st.error("API kredisi yetersiz. console.anthropic.com'dan kredi yükleyin.")
-                else:
-                    st.error(f"Hata: {error_msg}")
+                            messages.append({"role": "assistant", "content": response.content})
+                            messages.append({"role": "user", "content": tool_results})
+                            response = client.messages.create(
+                                model="claude-sonnet-4-20250514",
+                                max_tokens=4000,
+                                system=system_prompt,
+                                tools=TOOL_DEFINITIONS,
+                                messages=messages,
+                            )
+
+                        # Extract final text
+                        final_text = "".join(
+                            b.text for b in response.content if hasattr(b, "text")
+                        )
+
+                    st.markdown(final_text)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": final_text})
+
+                except Exception as e:
+                    error_msg = str(e)
+                    if "credit" in error_msg.lower():
+                        st.error("API kredisi yetersiz. console.anthropic.com'dan kredi yükleyin.")
+                    else:
+                        st.error(f"Hata: {error_msg}")
 
     # Clear chat button
     if st.session_state.chat_messages:
