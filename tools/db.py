@@ -15,9 +15,9 @@ def _get_client():
 
     # Try Streamlit secrets
     try:
-        url = st.secrets.get("SUPABASE_URL", None)
-        key = st.secrets.get("SUPABASE_KEY", None)
-    except Exception:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+    except (KeyError, FileNotFoundError, Exception):
         pass
 
     # Try environment variables
@@ -35,10 +35,14 @@ def _get_client():
     return create_client(url, key)
 
 
-@st.cache_resource
+_db_client = None
+
 def get_db():
-    """Cached Supabase client (one connection per app instance)."""
-    return _get_client()
+    """Get or create Supabase client."""
+    global _db_client
+    if _db_client is None:
+        _db_client = _get_client()
+    return _db_client
 
 
 def _clean_value(v):
