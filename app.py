@@ -27,28 +27,18 @@ for i in range(1, 20):
         break
 
 
-# ── JSON Persistence ─────────────────────────────────────────────────────────
-SAVED_DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_data.json")
-
-
-def load_saved_data():
-    """Load folders from saved_data.json. Initialize if missing."""
-    if os.path.exists(SAVED_DATA_PATH):
-        try:
-            with open(SAVED_DATA_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "folders" not in data:
-                data["folders"] = {"Genel": []}
-            return data
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {"folders": {"Genel": []}}
-
-
-def save_data(data):
-    """Write folders to saved_data.json."""
-    with open(SAVED_DATA_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# ── Supabase Persistence ─────────────────────────────────────────────────────
+from db import (
+    load_folders as db_load_folders,
+    create_folder as db_create_folder,
+    delete_folder as db_delete_folder,
+    load_brands as db_load_brands,
+    save_brand as db_save_brand,
+    save_brands_bulk as db_save_brands_bulk,
+    remove_brands_by_name as db_remove_brands_by_name,
+    move_brands as db_move_brands,
+    get_all_saved_count as db_get_all_saved_count,
+)
 
 
 # ── API Key Helper ───────────────────────────────────────────────────────────
@@ -165,10 +155,7 @@ st.markdown("""
 
 df = load_brands()
 
-# ── Load persistent data into session state ──────────────────────────────────
-if "folders" not in st.session_state:
-    saved = load_saved_data()
-    st.session_state.folders = saved["folders"]
+# ── Session state init ───────────────────────────────────────────────────────
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 if "haiku_messages" not in st.session_state:
@@ -185,7 +172,8 @@ page = st.sidebar.radio(
 
 # Sidebar folder count
 st.sidebar.divider()
-total_saved = sum(len(v) for v in st.session_state.folders.values())
+folder_names = db_load_folders()
+total_saved = db_get_all_saved_count()
 st.sidebar.metric("Kayıtlı Marka", total_saved)
 st.sidebar.metric("Klasör", len(st.session_state.folders))
 
@@ -359,18 +347,17 @@ if page == "Canlı Araştırma":
 
         # Folder selector + save button
         st.divider()
+        current_folders = db_load_folders()
         col_fs1, col_fs2, col_fs3 = st.columns([2, 2, 1])
         with col_fs1:
-            folder_names = list(st.session_state.folders.keys())
-            target_folder = st.selectbox("Klasör seç", folder_names, key="save_target_folder")
+            target_folder = st.selectbox("Klasör seç", current_folders, key="save_target_folder")
         with col_fs2:
             new_folder_name = st.text_input("veya yeni klasör", placeholder="Yeni klasör adı...", key="new_folder_inline")
         with col_fs3:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Yeni Klasör Oluştur", key="create_folder_inline", use_container_width=True):
-                if new_folder_name and new_folder_name not in st.session_state.folders:
-                    st.session_state.folders[new_folder_name] = []
-                    save_data({"folders": st.session_state.folders})
+                if new_folder_name:
+                    db_create_folder(new_folder_name)
                     st.success(f"'{new_folder_name}' oluşturuldu!")
                     st.rerun()
 
@@ -380,30 +367,21 @@ if page == "Canlı Araştırma":
         with col_sv1:
             if st.button("Seçilenleri Kaydet", type="primary", use_container_width=True, key="save_checked_btn"):
                 if selected_indices:
-                    save_folder = new_folder_name if new_folder_name and new_folder_name in st.session_state.folders else target_folder
-                    existing_names = {b["Marka"] for b in st.session_state.folders[save_folder]}
-                    added = 0
-                    for idx in selected_indices:
-                        brand_data = res_df.iloc[idx].to_dict()
-                        if brand_data["Marka"] not in existing_names:
-                            st.session_state.folders[save_folder].append(brand_data)
-                            existing_names.add(brand_data["Marka"])
-                            added += 1
-                    save_data({"folders": st.session_state.folders})
+                    save_folder = new_folder_name if new_folder_name else target_folder
+                    if new_folder_name:
+                        db_create_folder(new_folder_name)
+                    brands_to_save = [res_df.iloc[idx].to_dict() for idx in selected_indices]
+                    added = db_save_brands_bulk(save_folder, brands_to_save)
                     st.success(f"{added} marka '{save_folder}' klasörüne kaydedildi!")
                 else:
                     st.warning("Marka seçin")
         with col_sv2:
             if st.button("Tümünü Kaydet", use_container_width=True, key="save_all_btn"):
-                save_folder = new_folder_name if new_folder_name and new_folder_name in st.session_state.folders else target_folder
-                existing_names = {b["Marka"] for b in st.session_state.folders[save_folder]}
-                added = 0
-                for _, row in res_df.iterrows():
-                    if row["Marka"] not in existing_names:
-                        st.session_state.folders[save_folder].append(row.to_dict())
-                        existing_names.add(row["Marka"])
-                        added += 1
-                save_data({"folders": st.session_state.folders})
+                save_folder = new_folder_name if new_folder_name else target_folder
+                if new_folder_name:
+                    db_create_folder(new_folder_name)
+                all_brands = [row.to_dict() for _, row in res_df.iterrows()]
+                added = db_save_brands_bulk(save_folder, all_brands)
                 st.success(f"{added} marka '{save_folder}' klasörüne kaydedildi!")
 
         # Category breakdown chart
@@ -446,35 +424,32 @@ elif page == "Kaydedilenler":
     with col_fm2:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Klasör Oluştur", type="primary", use_container_width=True):
-            if new_folder and new_folder not in st.session_state.folders:
-                st.session_state.folders[new_folder] = []
-                save_data({"folders": st.session_state.folders})
-                st.success(f"'{new_folder}' klasörü oluşturuldu!")
-                st.rerun()
-            elif new_folder in st.session_state.folders:
-                st.warning("Bu klasör zaten var")
+            if new_folder:
+                if db_create_folder(new_folder):
+                    st.success(f"'{new_folder}' klasörü oluşturuldu!")
+                    st.rerun()
+                else:
+                    st.warning("Bu klasör zaten var")
     with col_fm3:
         st.markdown("<br>", unsafe_allow_html=True)
-        delete_folder = st.selectbox(
-            "Sil", [f for f in st.session_state.folders.keys() if f != "Genel"],
-            key="del_folder", label_visibility="collapsed",
-        )
-        if st.button("Klasörü Sil", use_container_width=True):
-            if delete_folder and delete_folder in st.session_state.folders:
-                del st.session_state.folders[delete_folder]
-                save_data({"folders": st.session_state.folders})
-                st.success(f"'{delete_folder}' silindi")
+        kf = db_load_folders()
+        deletable = [f for f in kf if f != "Genel"]
+        if deletable:
+            delete_folder_name = st.selectbox("Sil", deletable, key="del_folder", label_visibility="collapsed")
+            if st.button("Klasörü Sil", use_container_width=True):
+                db_delete_folder(delete_folder_name)
+                st.success(f"'{delete_folder_name}' silindi")
                 st.rerun()
 
     st.divider()
 
     # Folder tabs
-    folder_names = list(st.session_state.folders.keys())
-    if folder_names:
-        tabs = st.tabs(folder_names)
-        for tab, folder_name in zip(tabs, folder_names):
+    kf = db_load_folders()
+    if kf:
+        tabs = st.tabs(kf)
+        for tab, folder_name in zip(tabs, kf):
             with tab:
-                brands = st.session_state.folders[folder_name]
+                brands = db_load_brands(folder_name)
                 if brands:
                     st.markdown(f"**{len(brands)}** marka kayıtlı")
                     folder_df = pd.DataFrame(brands)
@@ -494,38 +469,24 @@ elif page == "Kaydedilenler":
                                  column_config=col_config)
 
                     # Remove brands
-                    remove_brands = st.multiselect(
-                        "Kaldırmak istediğin markaları seç",
-                        [b.get("Marka", b.get("brand", "")) for b in brands],
+                    brand_names_list = [b.get("Marka", b.get("brand", "")) for b in brands]
+                    remove_brands_sel = st.multiselect(
+                        "Kaldırmak istediğin markaları seç", brand_names_list,
                         key=f"remove_{folder_name}",
                     )
                     col_r1, col_r2 = st.columns(2)
                     with col_r1:
                         if st.button("Seçilenleri Kaldır", key=f"rem_btn_{folder_name}"):
-                            st.session_state.folders[folder_name] = [
-                                b for b in brands if b.get("Marka", b.get("brand", "")) not in remove_brands
-                            ]
-                            save_data({"folders": st.session_state.folders})
-                            st.success(f"{len(remove_brands)} marka kaldırıldı")
+                            db_remove_brands_by_name(folder_name, remove_brands_sel)
+                            st.success(f"{len(remove_brands_sel)} marka kaldırıldı")
                             st.rerun()
                     with col_r2:
-                        # Move to another folder
-                        other_folders = [f for f in folder_names if f != folder_name]
-                        if other_folders and remove_brands:
+                        other_folders = [f for f in kf if f != folder_name]
+                        if other_folders and remove_brands_sel:
                             move_to = st.selectbox("Taşı →", other_folders, key=f"move_{folder_name}")
                             if st.button("Seçilenleri Taşı", key=f"move_btn_{folder_name}"):
-                                moved = 0
-                                existing = {b.get("Marka", "") for b in st.session_state.folders[move_to]}
-                                for b in brands:
-                                    bname = b.get("Marka", b.get("brand", ""))
-                                    if bname in remove_brands and bname not in existing:
-                                        st.session_state.folders[move_to].append(b)
-                                        moved += 1
-                                st.session_state.folders[folder_name] = [
-                                    b for b in brands if b.get("Marka", b.get("brand", "")) not in remove_brands
-                                ]
-                                save_data({"folders": st.session_state.folders})
-                                st.success(f"{moved} marka '{move_to}' klasörüne taşındı")
+                                db_move_brands(folder_name, move_to, remove_brands_sel)
+                                st.success(f"Markalar '{move_to}' klasörüne taşındı")
                                 st.rerun()
 
                     # Export folder
