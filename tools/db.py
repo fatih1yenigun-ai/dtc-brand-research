@@ -9,15 +9,27 @@ from supabase import create_client
 
 
 def _get_client():
-    """Get Supabase client, trying Streamlit secrets first, then env vars."""
+    """Get Supabase client, trying multiple sources for credentials."""
+    url = None
+    key = None
+
+    # Try Streamlit secrets
     try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
+        url = st.secrets.get("SUPABASE_URL", None)
+        key = st.secrets.get("SUPABASE_KEY", None)
     except Exception:
-        from dotenv import load_dotenv
-        load_dotenv()
-        url = os.getenv("SUPABASE_URL", "")
-        key = os.getenv("SUPABASE_KEY", "")
+        pass
+
+    # Try environment variables
+    if not url or not key:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
+        url = url or os.getenv("SUPABASE_URL", "")
+        key = key or os.getenv("SUPABASE_KEY", "")
+
     if not url or not key:
         return None
     return create_client(url, key)
@@ -69,18 +81,16 @@ def create_folder(name):
     """Create a new folder. Returns True if created, False if exists."""
     db = get_db()
     if not db:
-        st.error("Veritabanı bağlantısı yok")
         return False
     try:
+        # Check if folder already exists
+        existing = db.table("folders").select("name").eq("name", name).execute()
+        if existing.data:
+            return True  # Already exists, not an error
         db.table("folders").insert({"name": name}).execute()
-        # Clear the cache so folder list refreshes
-        load_folders.clear() if hasattr(load_folders, 'clear') else None
         return True
     except Exception as e:
-        if "duplicate" in str(e).lower() or "unique" in str(e).lower() or "23505" in str(e):
-            st.warning("Bu klasör zaten var")
-        else:
-            st.error(f"Klasör oluşturma hatası: {e}")
+        st.error(f"Klasör oluşturma hatası: {e}")
         return False
 
 
