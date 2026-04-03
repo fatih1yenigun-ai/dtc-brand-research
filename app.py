@@ -18,6 +18,8 @@ from tqs_calculator import (
 from brand_metrics import BRAND_METRICS, CATEGORY_AOV_DEFAULTS
 from yuvacim_v3_generator import BRANDS, merge_brands
 from chat_tools import TOOL_DEFINITIONS, execute_tool
+from amazon_search import search_amazon_products, search_amazon_brand, deduplicate as amazon_deduplicate
+from amazon_bsr_estimator import estimate_monthly_sales, estimate_revenue as bsr_estimate_revenue, sales_tier, get_categories as get_amazon_categories
 
 # ── Load all batch data ──────────────────────────────────────────────────────
 for i in range(1, 20):
@@ -165,7 +167,7 @@ if "haiku_messages" not in st.session_state:
 st.sidebar.title("DTC Araştırma Paneli")
 page = st.sidebar.radio(
     "Sayfa Seç",
-    ["Canlı Araştırma", "Kaydedilenler", "Hintli Danışman", "Marka Tarayıcı",
+    ["Canlı Araştırma", "Amazon Araştırma", "Kaydedilenler", "Hintli Danışman", "Marka Tarayıcı",
      "Kategori Analizi", "TQS Hesaplayıcı", "AOV Tahminleyici", "Pazarlama Açıları"],
     index=0,
 )
@@ -407,6 +409,271 @@ if page == "Canlı Araştırma":
                 f"DTC_Arastirma_{keyword.replace(' ', '_')}.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: AMAZON ARAŞTIRMA (AMAZON RESEARCH)
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Amazon Araştırma":
+    st.markdown('<p class="main-header">Amazon Urun Arastirma</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Amazon.com urun ve marka arastirmasi - BSR bazli satis tahmini</p>', unsafe_allow_html=True)
+
+    # Session state
+    if "amazon_results" not in st.session_state:
+        st.session_state.amazon_results = None
+    if "amazon_search_type" not in st.session_state:
+        st.session_state.amazon_search_type = "product"
+
+    # Tabs
+    tab_product, tab_brand, tab_bsr_calc = st.tabs(["Urun Arama", "Marka Arama", "BSR Hesaplayici"])
+
+    # ── TAB 1: Product Search ────────────────────────────────────────────────
+    with tab_product:
+        col_a1, col_a2 = st.columns([3, 1])
+        with col_a1:
+            amz_keyword = st.text_input(
+                "Anahtar Kelime",
+                placeholder="orn: yoga mat, wireless earbuds, kitchen organizer...",
+                key="amz_keyword",
+            )
+        with col_a2:
+            amz_max = st.selectbox("Sonuc Sayisi", [20, 30, 50, 75, 100], index=1, key="amz_max")
+
+        amz_search = st.button("Amazon'da Ara", type="primary", use_container_width=True, key="amz_search_btn")
+
+        if amz_search and amz_keyword:
+            try:
+                with st.status(f"'{amz_keyword}' icin Amazon'da arama yapiliyor...", expanded=True) as status:
+                    st.write("Apify actor calistiriliyor... (30-60 sn surebilir)")
+                    results = search_amazon_products(amz_keyword, max_items=amz_max)
+                    results = amazon_deduplicate(results)
+                    status.update(label=f"{len(results)} urun bulundu!", state="complete")
+
+                st.session_state.amazon_results = results
+                st.session_state.amazon_search_type = "product"
+            except Exception as e:
+                error_msg = str(e)
+                if "APIFY_API_TOKEN" in error_msg:
+                    st.error("APIFY_API_TOKEN .env dosyasinda bulunamadi. Lutfen ekleyin.")
+                elif "apify_client" in error_msg:
+                    st.error("apify-client paketi yuklu degil. Calistirin: pip install apify-client")
+                else:
+                    st.error(f"Hata: {error_msg}")
+
+    # ── TAB 2: Brand Search ──────────────────────────────────────────────────
+    with tab_brand:
+        col_b1, col_b2 = st.columns([3, 1])
+        with col_b1:
+            amz_brand = st.text_input(
+                "Marka Adi",
+                placeholder="orn: Anker, COSRX, Stanley, Hydro Flask...",
+                key="amz_brand",
+            )
+        with col_b2:
+            amz_brand_max = st.selectbox("Sonuc Sayisi", [20, 30, 50, 75, 100], index=2, key="amz_brand_max")
+
+        amz_brand_search = st.button("Markayi Ara", type="primary", use_container_width=True, key="amz_brand_btn")
+
+        if amz_brand_search and amz_brand:
+            try:
+                with st.status(f"'{amz_brand}' markasi Amazon'da araniyor...", expanded=True) as status:
+                    st.write("Apify actor calistiriliyor...")
+                    results = search_amazon_brand(amz_brand, max_items=amz_brand_max)
+                    results = amazon_deduplicate(results)
+                    status.update(label=f"{len(results)} urun bulundu!", state="complete")
+
+                st.session_state.amazon_results = results
+                st.session_state.amazon_search_type = "brand"
+            except Exception as e:
+                st.error(f"Hata: {str(e)}")
+
+    # ── TAB 3: BSR Calculator ────────────────────────────────────────────────
+    with tab_bsr_calc:
+        st.markdown("##### BSR'den Satis Tahmini")
+        st.caption("Bir urunun BSR (Best Sellers Rank) degerini girerek tahmini aylik satisi hesaplayin.")
+
+        col_c1, col_c2, col_c3 = st.columns(3)
+        with col_c1:
+            bsr_input = st.number_input("BSR (Best Sellers Rank)", min_value=1, max_value=5000000, value=1000, key="bsr_input")
+        with col_c2:
+            bsr_price = st.number_input("Urun Fiyati ($)", min_value=0.01, max_value=10000.0, value=25.0, step=0.5, key="bsr_price")
+        with col_c3:
+            bsr_category = st.selectbox("Kategori", get_amazon_categories(), index=0, key="bsr_cat")
+
+        if bsr_input:
+            est_sales = estimate_monthly_sales(bsr_input, bsr_category)
+            est_rev = bsr_estimate_revenue(bsr_input, bsr_price, bsr_category)
+            tier = sales_tier(est_sales)
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Tahmini Aylik Satis", f"{est_sales:,}")
+            mc2.metric("Tahmini Aylik Gelir", f"${est_rev:,.0f}")
+            mc3.metric("Tahmini Yillik Gelir", f"${est_rev * 12:,.0f}")
+            mc4.metric("Satis Seviyesi", tier)
+
+            # BSR reference table
+            st.divider()
+            st.markdown("##### BSR Referans Tablosu")
+            st.caption(f"Kategori: {bsr_category}")
+            ref_bsrs = [1, 50, 100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
+            ref_data = []
+            for b in ref_bsrs:
+                s = estimate_monthly_sales(b, bsr_category)
+                r = bsr_estimate_revenue(b, bsr_price, bsr_category)
+                ref_data.append({
+                    "BSR": f"#{b:,}",
+                    "Aylik Satis": f"{s:,}",
+                    f"Aylik Gelir (${bsr_price:.0f})": f"${r:,.0f}",
+                    "Seviye": sales_tier(s),
+                })
+            st.dataframe(pd.DataFrame(ref_data), use_container_width=True, hide_index=True)
+
+    # ── RESULTS DISPLAY (shared between product & brand tabs) ────────────────
+    if st.session_state.amazon_results:
+        results = st.session_state.amazon_results
+        st.divider()
+
+        search_label = "Urun" if st.session_state.amazon_search_type == "product" else "Marka"
+        st.subheader(f"{len(results)} {search_label} Sonucu")
+
+        # Convert to DataFrame
+        amz_rows = []
+        for r in results:
+            amz_rows.append({
+                "ASIN": r.get("asin", ""),
+                "Urun Adi": r.get("title", "")[:80],
+                "Marka": r.get("brand", ""),
+                "Fiyat ($)": r.get("price", 0),
+                "Puan": r.get("rating", 0),
+                "Yorum Sayisi": r.get("review_count", 0),
+                "BSR": r.get("bsr", 0),
+                "Kategori": r.get("category", ""),
+                "Aylik Satis (Tah.)": r.get("monthly_sales_est", 0),
+                "Aylik Gelir (Tah.)": r.get("monthly_revenue_est", 0),
+                "Seviye": r.get("sales_tier", "-"),
+                "Prime": "Evet" if r.get("is_prime") else "-",
+                "URL": r.get("url", ""),
+            })
+
+        amz_df = pd.DataFrame(amz_rows)
+
+        # Filter out zero-price or empty results
+        if not amz_df.empty:
+            # Top metrics
+            valid_prices = amz_df[amz_df["Fiyat ($)"] > 0]
+            valid_bsr = amz_df[amz_df["BSR"] > 0]
+            valid_rev = amz_df[amz_df["Aylik Gelir (Tah.)"] > 0]
+
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Toplam Urun", len(amz_df))
+            m2.metric("Ort. Fiyat", f"${valid_prices['Fiyat ($)'].mean():.2f}" if not valid_prices.empty else "-")
+            m3.metric("Ort. Puan", f"{amz_df['Puan'].mean():.1f}" if amz_df['Puan'].sum() > 0 else "-")
+            m4.metric("Ort. Yorum", f"{amz_df['Yorum Sayisi'].mean():,.0f}" if amz_df['Yorum Sayisi'].sum() > 0 else "-")
+            m5.metric("Ort. Aylik Gelir", f"${valid_rev['Aylik Gelir (Tah.)'].mean():,.0f}" if not valid_rev.empty else "-")
+
+            # Sort options
+            sort_col = st.selectbox("Sirala", [
+                "Aylik Gelir (Tah.)", "Aylik Satis (Tah.)", "BSR", "Fiyat ($)",
+                "Yorum Sayisi", "Puan",
+            ], key="amz_sort")
+            ascending = sort_col == "BSR"  # BSR: lower is better
+            amz_df_sorted = amz_df.sort_values(sort_col, ascending=ascending)
+
+            # Display table
+            st.dataframe(
+                amz_df_sorted,
+                use_container_width=True,
+                height=500,
+                column_config={
+                    "Fiyat ($)": st.column_config.NumberColumn("Fiyat ($)", format="$%.2f"),
+                    "Puan": st.column_config.NumberColumn("Puan", format="%.1f"),
+                    "Yorum Sayisi": st.column_config.NumberColumn("Yorum", format="%d"),
+                    "BSR": st.column_config.NumberColumn("BSR", format="%d"),
+                    "Aylik Satis (Tah.)": st.column_config.NumberColumn("Aylik Satis", format="%d"),
+                    "Aylik Gelir (Tah.)": st.column_config.NumberColumn("Aylik Gelir", format="$%d"),
+                    "URL": st.column_config.LinkColumn("URL", display_text="Amazon"),
+                },
+                hide_index=True,
+            )
+
+            # Charts
+            if not valid_rev.empty and len(valid_rev) > 3:
+                col_ch1, col_ch2 = st.columns(2)
+
+                with col_ch1:
+                    # Price distribution
+                    fig_price = px.histogram(
+                        valid_prices, x="Fiyat ($)", nbins=15,
+                        title="Fiyat Dagilimi",
+                        color_discrete_sequence=["#667eea"],
+                    )
+                    fig_price.update_layout(height=350)
+                    st.plotly_chart(fig_price, use_container_width=True)
+
+                with col_ch2:
+                    # Revenue by brand (top 10)
+                    if amz_df_sorted["Marka"].nunique() > 1:
+                        brand_rev = amz_df_sorted.groupby("Marka")["Aylik Gelir (Tah.)"].sum().sort_values(ascending=False).head(10)
+                        fig_brand = px.bar(
+                            x=brand_rev.values, y=brand_rev.index,
+                            orientation="h",
+                            title="Marka Bazinda Tahmini Gelir (Top 10)",
+                            labels={"x": "Aylik Gelir ($)", "y": "Marka"},
+                            color_discrete_sequence=["#764ba2"],
+                        )
+                        fig_brand.update_layout(height=350, yaxis=dict(autorange="reversed"))
+                        st.plotly_chart(fig_brand, use_container_width=True)
+                    else:
+                        # Sales tier distribution
+                        tier_counts = amz_df_sorted["Seviye"].value_counts().reset_index()
+                        tier_counts.columns = ["Seviye", "Sayi"]
+                        fig_tier = px.pie(tier_counts, values="Sayi", names="Seviye",
+                                         title="Satis Seviyesi Dagilimi", hole=0.4)
+                        fig_tier.update_layout(height=350)
+                        st.plotly_chart(fig_tier, use_container_width=True)
+
+                # Scatter: Price vs Reviews (bubble = revenue)
+                scatter_df = amz_df_sorted[(amz_df_sorted["Fiyat ($)"] > 0) & (amz_df_sorted["Yorum Sayisi"] > 0)]
+                if len(scatter_df) > 3:
+                    fig_scatter = px.scatter(
+                        scatter_df,
+                        x="Fiyat ($)", y="Yorum Sayisi",
+                        size="Aylik Gelir (Tah.)",
+                        color="Seviye",
+                        hover_name="Urun Adi",
+                        title="Fiyat vs Yorum (Balon = Tahmini Gelir)",
+                        color_discrete_map={
+                            "Cok Yuksek": "#00b894",
+                            "Yuksek": "#00cec9",
+                            "Orta": "#fdcb6e",
+                            "Dusuk": "#e17055",
+                            "Cok Dusuk": "#d63031",
+                        },
+                    )
+                    fig_scatter.update_layout(height=450)
+                    st.plotly_chart(fig_scatter, use_container_width=True)
+
+            # Export
+            st.divider()
+            col_e1, col_e2, col_e3 = st.columns(3)
+            with col_e1:
+                csv = amz_df_sorted.to_csv(index=False).encode("utf-8")
+                st.download_button("CSV Indir", csv,
+                    f"Amazon_{amz_keyword if 'amz_keyword' in dir() else 'search'}.csv", "text/csv",
+                    use_container_width=True)
+            with col_e2:
+                from io import BytesIO
+                buffer = BytesIO()
+                amz_df_sorted.to_excel(buffer, index=False, engine="openpyxl")
+                st.download_button("Excel Indir", buffer.getvalue(),
+                    f"Amazon_{amz_keyword if 'amz_keyword' in dir() else 'search'}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+            with col_e3:
+                json_str = json.dumps(results, indent=2, ensure_ascii=False).encode("utf-8")
+                st.download_button("JSON Indir", json_str,
+                    f"Amazon_{amz_keyword if 'amz_keyword' in dir() else 'search'}.json", "application/json",
+                    use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
